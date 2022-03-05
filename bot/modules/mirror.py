@@ -9,17 +9,31 @@ import time
 import shutil
 import glob
 
+from re import match, search, split as resplit
+from time import sleep, time
+from os import path as ospath, remove as osremove, listdir, walk
+from shutil import rmtree
+from threading import Thread
+from subprocess import run as srun
+from pathlib import PurePath
+from html import escape
+from urllib.parse import quote
 from telegram.ext import CommandHandler
 from telegram import InlineKeyboardMarkup
 from ftplib import FTP
 
 from bot import Interval, INDEX_URL, BUTTON_FOUR_NAME, BUTTON_FOUR_URL, BUTTON_FIVE_NAME, BUTTON_FIVE_URL, \
                 BUTTON_SIX_NAME, BUTTON_SIX_URL, BLOCK_MEGA_FOLDER, BLOCK_MEGA_LINKS, VIEW_LINK, aria2, QB_SEED, \
-                dispatcher, DOWNLOAD_DIR, download_dict, download_dict_lock, TG_SPLIT_SIZE, LOGGER , FTP_SERVER, FTP_USER, FTP_PASSWORD
+                dispatcher, DOWNLOAD_DIR, download_dict, download_dict_lock, TG_SPLIT_SIZE, LOGGER
+from bot.helper.ext_utils.bot_utils import is_url, is_magnet, is_gdtot_link, is_mega_link, is_gdrive_link, get_content_type, get_mega_link_type
+from bot.helper.ext_utils.fs_utils import get_base_name, get_path_size, split as fssplit, clean_download, FTP_SERVER, FTP_USER, FTP_PASSWORD
+
 from bot.helper.ext_utils import fs_utils, bot_utils
 from bot.helper.ext_utils.shortenurl import short_url
 from bot.helper.ext_utils.exceptions import DirectDownloadLinkException, NotSupportedExtractionArchive
 from bot.helper.mirror_utils.download_utils.aria2_download import add_aria2c_download
+from bot.helper.mirror_utils.upload_utils.gdriveTools import GoogleDriveHelper
+from bot.helper.mirror_utils.upload_utils.pyrogramEngine import TgUploader
 from bot.helper.mirror_utils.download_utils.mega_downloader import add_mega_download
 from bot.helper.mirror_utils.download_utils.gd_downloader import add_gd_download
 from bot.helper.mirror_utils.download_utils.qbit_downloader import add_qb_torrent
@@ -31,16 +45,16 @@ from bot.helper.mirror_utils.status_utils.zip_status import ZipStatus
 from bot.helper.mirror_utils.status_utils.split_status import SplitStatus
 from bot.helper.mirror_utils.status_utils.upload_status import UploadStatus
 from bot.helper.mirror_utils.status_utils.tg_upload_status import TgUploadStatus
-from bot.helper.mirror_utils.upload_utils import gdriveTools, pyrogramEngine
 from bot.helper.telegram_helper.bot_commands import BotCommands
 from bot.helper.telegram_helper.filters import CustomFilters
 from bot.helper.telegram_helper.message_utils import sendMessage, sendMarkup, delete_all_messages, update_all_messages
-from bot.helper.telegram_helper import button_build
+from bot.helper.telegram_helper.button_build import ButtonMaker
 
-
-class MirrorListener(listeners.MirrorListeners):
-    def __init__(self, bot, update, isZip=False, extract=False, isQbit=False, isLeech=False, pswd=None, isFtp=False, tag=None):
-        super().__init__(bot, update)
+class MirrorListener:
+    def __init__(self, bot, message, isZip=False, extract=False, isQbit=False, isLeech=False, pswd=None, tag=None, isFtp=False):
+        self.bot = bot
+        self.message = message
+        self.uid = self.message.message_id
         self.extract = extract
         self.isZip = isZip
         self.isQbit = isQbit
@@ -72,35 +86,33 @@ class MirrorListener(listeners.MirrorListeners):
             name = str(download.name()).replace('/', '')
             gid = download.gid()
             size = download.size_raw()
-            if name == "None" or self.isQbit:
-                name = os.listdir(f'{DOWNLOAD_DIR}{self.uid}')[-1]
+            if name == "None" or self.isQbit or not ospath.exists(f'{DOWNLOAD_DIR}{self.uid}/{name}'):
+                name = listdir(f'{DOWNLOAD_DIR}{self.uid}')[-1]
             m_path = f'{DOWNLOAD_DIR}{self.uid}/{name}'
         if self.isZip:
             try:
                 with download_dict_lock:
                     download_dict[self.uid] = ZipStatus(name, m_path, size)
-                pswd = self.pswd
                 path = m_path + ".zip"
                 LOGGER.info(f'Zip: orig_path: {m_path}, zip_path: {path}')
-                if pswd is not None:
+                if self.pswd is not None:
                     if self.isLeech and int(size) > TG_SPLIT_SIZE:
-                        path = m_path + ".zip"
-                        subprocess.run(["7z", f"-v{TG_SPLIT_SIZE}b", "a", "-mx=0", f"-p{pswd}", path, m_path])
+                        srun(["7z", f"-v{TG_SPLIT_SIZE}b", "a", "-mx=0", f"-p{self.pswd}", path, m_path])
                     else:
-                        subprocess.run(["7z", "a", "-mx=0", f"-p{pswd}", path, m_path])
+                        srun(["7z", "a", "-mx=0", f"-p{self.pswd}", path, m_path])
                 elif self.isLeech and int(size) > TG_SPLIT_SIZE:
-                    path = m_path + ".zip"
-                    subprocess.run(["7z", f"-v{TG_SPLIT_SIZE}b", "a", "-mx=0", path, m_path])
+                    srun(["7z", f"-v{TG_SPLIT_SIZE}b", "a", "-mx=0", path, m_path])
                 else:
-                    subprocess.run(["7z", "a", "-mx=0", path, m_path])
+                    srun(["7z", "a", "-mx=0", path, m_path])
             except FileNotFoundError:
                 LOGGER.info('File to archive not found!')
                 self.onUploadError('Internal error occurred!!')
                 return
-            try:
-                shutil.rmtree(m_path)
-            except:
-                os.remove(m_path)
+            if not self.isQbit or not QB_SEED or self.isLeech:
+                try:
+                    rmtree(m_path)
+                except:
+                    osremove(m_path)
         elif self.extract:
             try:
                 if os.path.isfile(m_path):
